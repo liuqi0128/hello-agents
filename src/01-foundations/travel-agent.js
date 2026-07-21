@@ -1,6 +1,5 @@
 import OpenAI from "openai";
-import readline from "node:readline/promises";
-import { stdin as input, stdout as output } from "node:process";
+import { createTerminalChat } from "../shared/terminal-chat.js";
 
 const apiKey = process.env.LLM_API_KEY?.trim();
 const baseURL = process.env.LLM_BASE_URL?.trim();
@@ -50,6 +49,21 @@ function getAttraction({ city, weather }) {
   return { city, weather, recommendation: rainy ? entry.rain : entry.default };
 }
 
+function getTransport({ city, weather }) {
+  const suggestions = {
+    北京: {
+      rain: "优先乘坐地铁，短途可打车，避免骑行",
+      default: "优先乘坐地铁，短途可步行或骑共享单车",
+    },
+  };
+  const entry = suggestions[city] ?? {
+    rain: "优先乘坐地铁、公交或出租车，避免骑行",
+    default: "优先乘坐公共交通，短途可步行或骑行",
+  };
+  const rainy = /rain|雨|雷暴/i.test(weather);
+  return { city, weather, recommendation: rainy ? entry.rain : entry.default };
+}
+
 const tools = [
   {
     type: "function",
@@ -80,32 +94,63 @@ const tools = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "get_transport",
+      description: "根据城市和天气推荐合适的交通工具。必须在已得到天气后调用。",
+      parameters: {
+        type: "object",
+        properties: {
+          city: { type: "string" },
+          weather: { type: "string", description: "get_weather 返回的 condition" },
+        },
+        required: ["city", "weather"],
+        additionalProperties: false,
+      },
+    },
+  },
 ];
 
-const implementations = { get_weather: getWeather, get_attraction: getAttraction };
+const implementations = {
+  get_weather: getWeather,
+  get_attraction: getAttraction,
+  get_transport: getTransport,
+};
+
 const messages = [
-  // {
-  //   role: "system",
-  //   content: "你是可靠的旅行助手。根据工具结果回答；不要编造实时天气。缺少城市、日期或关键偏好时，先简洁追问用户。工具发生错误时，如实说明。",
-  // },
+  {
+    role: "system",
+    content:
+      "你是可靠的旅行助手。根据工具结果回答；不要编造实时天气。缺少城市、日期或关键偏好时，先简洁追问用户。工具发生错误时，如实说明。",
+  },
 ];
+
+const ui = createTerminalChat({
+  title: "旅游助手 · 01 Foundations",
+  subtitle: "模型调用 + 工具调用入门",
+  agentName: "旅游助手",
+  promptLabel: "用户",
+});
 
 async function respondToUser() {
   for (let turn = 0; turn < 6; turn += 1) {
-    console.log('messages',messages)
-    const completion = await client.chat.completions.create({
-      model,
-      messages,
-      tools,
-      tool_choice: "auto",
-      temperature: 0.2,
-    });
+    const completion = await ui.withSpinner("正在思考…", () =>
+      client.chat.completions.create({
+        model,
+        messages,
+        tools,
+        tool_choice: "auto",
+        temperature: 0.2,
+      }),
+    );
+
     const assistant = completion.choices[0]?.message;
     if (!assistant) throw new Error("模型没有返回消息");
     messages.push(assistant);
 
     if (!assistant.tool_calls?.length) {
-      console.log(`旅行助手：${assistant.content ?? ""}`);
+      ui.printAssistant(assistant.content ?? "");
       return;
     }
 
@@ -119,7 +164,7 @@ async function respondToUser() {
       } catch (error) {
         result = { error: `工具参数无效：${error.message}` };
       }
-      console.log(`[工具] ${call.function.name}:`, result);
+      ui.printTool(call.function.name, result);
       messages.push({
         role: "tool",
         tool_call_id: call.id,
@@ -128,26 +173,10 @@ async function respondToUser() {
     }
   }
 
-  console.log("旅行助手：本轮工具调用次数已达到上限，请换一种说法或补充信息。");
+  ui.printAssistant("本轮工具调用次数已达到上限，请换一种说法或补充信息。");
 }
 
-const rl = readline.createInterface({ input, output });
-console.log("旅行助手已启动。输入 exit、quit 或 退出可结束对话。\n");
-
-try {
-  while (true) {
-    const userInput = (await rl.question("你：")).trim();
-    if (/^(exit|quit|退出)$/i.test(userInput)) break;
-    if (!userInput) continue;
-
-    messages.push({ role: "user", content: userInput });
-    try {
-      await respondToUser();
-    } catch (error) {
-      console.error(`旅行助手：请求失败：${error.message}`);
-    }
-    console.log();
-  }
-} finally {
-  rl.close();
-}
+await ui.runLoop(async (userInput) => {
+  messages.push({ role: "user", content: userInput });
+  await respondToUser();
+});

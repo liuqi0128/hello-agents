@@ -258,7 +258,41 @@ const completion = await client.chat.completions.create({
 
 `tools` 与 `tool_choice` 不能替代安全控制。即使使用 `"auto"`，程序仍必须通过 `implementations` 白名单、参数校验、超时和权限检查来决定是否真正执行。
 
-### 疑问 2：定义了 `tools` 后是否必须调用？用户没有给城市时是否需要额外流程？
+### 疑问 2：`tools` 中每个工具的定义和参数分别有什么作用？
+
+每个工具定义都是一份提供给模型的“函数说明书”，其通用结构如下：
+
+- `type: "function"`：声明这是一个函数工具。
+- `function`：保存函数工具的具体说明。
+- `name`：模型发起调用时使用的工具名，必须与 `implementations` 中的键一致，例如 `get_weather` 对应 `implementations.get_weather`。
+- `description`：向模型说明工具的用途和调用时机。它能引导模型决策，但不能代替程序中的权限检查或流程控制。
+- `parameters`：使用 JSON Schema 描述工具接收的参数。
+  - `type: "object"`：参数整体必须是一个对象。
+  - `properties`：声明对象允许包含哪些字段，以及每个字段的数据类型和说明。
+  - `required`：列出调用时必须提供的字段。
+  - `additionalProperties: false`：声明不接受 `properties` 之外的额外字段。
+
+当前三个工具的业务参数分别是：
+
+- `get_weather`
+  - `city`：要查询实时天气的城市名称，是必填字符串，例如 `"北京"`。
+- `get_attraction`
+  - `city`：要推荐景点的城市。
+  - `weather`：`get_weather` 返回的 `condition`，用于判断推荐室内还是室外景点。
+- `get_transport`
+  - `city`：要推荐交通方式的城市。
+  - `weather`：`get_weather` 返回的 `condition`，用于判断是否适合步行、骑行或应优先选择公共交通。
+
+模型返回的 `call.function.arguments` 实际上是 JSON 字符串。程序先用 `JSON.parse` 将其转成对象，再传给对应实现：
+
+```js
+const args = JSON.parse(call.function.arguments);
+result = run ? await run(args) : { error: `未知工具：${call.function.name}` };
+```
+
+例如，`{"city":"北京","weather":"Rain"}` 会传入 `getTransport({ city, weather })`。需要注意，`description` 中“必须先查询天气”只是给模型的调用提示，JSON Schema 本身无法表达工具之间的先后依赖；真正严格的顺序和参数校验仍应由应用代码保证。此外，当前示例只执行了 `JSON.parse`，并没有使用 JSON Schema 校验器，生产代码不能只依赖模型服务遵守这些约束。
+
+### 疑问 3：定义了 `tools` 后是否必须调用？用户没有给城市时是否需要额外流程？
 
 不需要。`tools` 是模型**可以请求使用**的能力集合，不是必须按顺序执行的待办列表。当前示例使用 `tool_choice: "auto"`，模型可以在每轮选择直接回答、提出澄清问题，或者调用一个或多个工具。
 
@@ -287,7 +321,7 @@ const completion = await client.chat.completions.create({
 
 现有示例在“没有 `tool_calls`”时会打印模型文本并 `break`，因此会把“请问去哪个城市？”当作本轮最终输出。要支持上面的对话流程，需要在外层增加一个交互循环：保留当前 `messages`，显示模型的追问，读取下一条用户输入，再追加 `{ role: "user", content: "北京" }` 后重新调用模型。这个外层循环是**多轮对话状态管理**，不是额外强制调用工具。
 
-### 疑问 3：Vibe Coding 中说的“上下文”就是 `messages` 吗？对话太多会导致 `messages` 过多吗？
+### 疑问 4：Vibe Coding 中说的“上下文”就是 `messages` 吗？对话太多会导致 `messages` 过多吗？
 
 在当前 `travel-agent.js` 这种 Chat Completions 实现中，`messages` 是每次发送给模型的**主要上下文载体**。每轮请求都会携带系统规则、用户消息、模型回复、工具调用请求和工具执行结果。因此，持续对话确实会让 `messages` 数组变长。
 
@@ -314,7 +348,7 @@ const completion = await client.chat.completions.create({
 
 常见策略是保留固定的系统规则、最近几轮完整对话，以及一段历史摘要；用户偏好等长期事实写入第八章的记忆系统；文档知识按需检索，而不是始终附在 `messages` 中。裁剪时不能只粗暴地 `slice` 数组：一个 `role: "tool"` 消息必须和它前面的工具调用请求保持配对。应按完整对话轮次压缩或删除，避免留下孤立工具结果。
 
-### 疑问 4：控制台中的“输入（命中缓存）”与 `messages` 有关系吗？
+### 疑问 5：控制台中的“输入（命中缓存）”与 `messages` 有关系吗？
 
 有关系。许多模型服务会对请求中**重复的输入前缀**做 Prompt Cache（上下文缓存）。在当前 Agent 中，每一轮请求通常具有这样的结构：
 
@@ -333,4 +367,4 @@ const completion = await client.chat.completions.create({
 - 不要在系统提示前部插入每轮变化的时间戳、随机 ID 或动态说明；这种变化会使其后的前缀难以命中缓存。
 - 历史摘要、裁剪或更换工具 Schema 后，变化点之后的内容可能不再命中，这是正常现象。
 
-缓存命中通常能降低输入延迟和费用，但**不会减少上下文窗口占用**。即使 14,080 个输入 token 命中缓存，它们仍属于本次模型可见的上下文，仍可能因 `messages` 过长而触及上下文上限。因此，缓存优化和第三条中的上下文压缩需要同时做。
+缓存命中通常能降低输入延迟和费用，但**不会减少上下文窗口占用**。即使 14,080 个输入 token 命中缓存，它们仍属于本次模型可见的上下文，仍可能因 `messages` 过长而触及上下文上限。因此，缓存优化和第四条中的上下文压缩需要同时做。

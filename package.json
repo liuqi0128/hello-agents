@@ -9,11 +9,20 @@
     "pnpm": ">=9"
   },
   "scripts": {
+    "start": "node --env-file=.env index.js",
+    "dev": "node --env-file=.env index.js",
     "dev:01": "node --env-file=.env src/01-foundations/travel-agent.js",
     "test": "node --test"
   },
   "dependencies": {
+    "@inquirer/prompts": "^8.5.2",
+    "boxen": "^8.0.1",
+    "chalk": "^5.6.2",
+    "cli-table3": "^0.6.5",
+    "ink": "^7.1.1",
     "openai": "^5.12.2",
+    "ora": "^9.4.1",
+    "react": "^19.2.7",
     "zod": "^3.25.76"
   }
 }
